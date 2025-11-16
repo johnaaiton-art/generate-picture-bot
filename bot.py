@@ -157,7 +157,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f.write(chunk)
 
         with open(img_path, 'rb') as photo:
-            caption = f"✅ 原词: {text}\n🎨 场景: {enhanced_prompt[:100]}"
+            caption = f"✅ 原词: {text}\n🎨 场景: {enhanced_prompt[:200]}"
             await update.message.reply_photo(photo=photo, caption=caption)
 
         os.remove(img_path)
