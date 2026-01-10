@@ -22,12 +22,21 @@ SIZE = '1024*1024'
 MODEL_LLM = 'qwen-plus'
 
 dashscope.api_key = DASHSCOPE_API_KEY
-dashscope.base_http_api_url = 'https://dashscope-intl.aliyuncs.com/api/v1'  # No trailing spaces
+dashscope.base_http_api_url = 'https://dashscope-intl.aliyuncs.com/api/v1'
 
-TEMP_DIR = tempfile.mkdtemp()  # Ephemeral but reliable on Railway
+TEMP_DIR = tempfile.mkdtemp()
+
+# ------------------ LANGUAGE DETECTION ------------------
+def is_chinese(text: str) -> bool:
+    """Simple check: if text contains Chinese characters, treat as Chinese"""
+    for char in text:
+        if '\u4e00' <= char <= '\u9fff':
+            return True
+    return False
 
 # ------------------ PROMPT REWRITING ------------------
 async def rewrite_prompt_with_qwen(user_phrase: str) -> str:
+    """For Chinese input: enhance with Chengdu context"""
     system_prompt = (
         "你是一个专为图像生成模型设计的提示词工程师。"
         "请将用户给出的中文短语（可能抽象）转化为一个具体、生动、视觉化的场景描述。"
@@ -50,7 +59,7 @@ async def rewrite_prompt_with_qwen(user_phrase: str) -> str:
         )
         if response.status_code == 200:
             rewritten = response.output['text'].strip()
-            return rewritten.replace('"', '').replace('“', '').replace('”', '')
+            return rewritten.replace('"', '').replace('"', '').replace('"', '')
         else:
             logging.error(f"Qwen error: {response.code} - {response.message}")
             return f"成都场景中，人们正在体验'{user_phrase}'，真实生活，细节丰富"
@@ -126,9 +135,10 @@ async def generate_image_from_prompt(prompt: str, update: Update) -> Optional[st
 # ------------------ TELEGRAM HANDLERS ------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        '🖼️ 发送任意中文短语（如"精神上的满足"），我将自动生成一张表现其含义的图片！\n'
-        '全自动，无需解释，直接发词即可。\n\n'
-        '⚠️ 注意：图像生成可能需要1-3分钟，请耐心等待。'
+        '🖼️ Send me text in Chinese or English:\n'
+        '• Chinese: I will create a scene set in Chengdu\n'
+        '• English: I will generate exactly what you describe\n\n'
+        '⚠️ Note: Image generation may take 1-3 minutes.'
     )
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -136,11 +146,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not text or text.startswith('/'):
         return
 
-    await update.message.reply_text(f'🧠 正在理解“{text}”...')
-
-    enhanced_prompt = await rewrite_prompt_with_qwen(text)
-    logging.info(f"Enhanced prompt: {enhanced_prompt}")
-    await update.message.reply_text('🎨 正在生成图像，请稍候...')
+    # Detect language and set prompt accordingly
+    if is_chinese(text):
+        # Chinese mode: enhance with Chengdu context
+        await update.message.reply_text(f'🧠 正在理解"{text}"...')
+        enhanced_prompt = await rewrite_prompt_with_qwen(text)
+        logging.info(f"Enhanced prompt (Chinese): {enhanced_prompt}")
+        await update.message.reply_text('🎨 正在生成图像，请稍候...')
+    else:
+        # English mode: use directly as prompt
+        await update.message.reply_text(f'🎨 Generating: "{text}"...')
+        enhanced_prompt = text
+        logging.info(f"Direct prompt (English): {enhanced_prompt}")
 
     img_url = await generate_image_from_prompt(enhanced_prompt, update)
     if not img_url:
@@ -157,7 +174,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f.write(chunk)
 
         with open(img_path, 'rb') as photo:
-            caption = f"✅ 原词: {text}\n🎨 场景: {enhanced_prompt[:200]}"
+            if is_chinese(text):
+                caption = f"✅ 原词: {text}\n🎨 场景: {enhanced_prompt[:200]}"
+            else:
+                caption = f"✅ Prompt: {text}"
             await update.message.reply_photo(photo=photo, caption=caption)
 
         os.remove(img_path)
