@@ -4,21 +4,25 @@ import logging
 import requests
 import asyncio
 import tempfile
+import base64
 from typing import Optional
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 import dashscope
-from dashscope import Generation, ImageSynthesis
+from dashscope import Generation
 
 # ------------------ CONFIG ------------------
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 DASHSCOPE_API_KEY = os.getenv('DASHSCOPE_API_KEY')
+YANDEX_API_KEY = os.getenv('YANDEX_API_KEY')
+YANDEX_FOLDER_ID = os.getenv('YANDEX_FOLDER_ID')
 
 if not TELEGRAM_BOT_TOKEN or not DASHSCOPE_API_KEY:
     raise EnvironmentError("Missing TELEGRAM_BOT_TOKEN or DASHSCOPE_API_KEY in environment variables.")
 
-MODEL_IMAGE = 'wan2.2-t2i-flash'
-SIZE = '1024*1024'
+if not YANDEX_API_KEY or not YANDEX_FOLDER_ID:
+    raise EnvironmentError("Missing YANDEX_API_KEY or YANDEX_FOLDER_ID in environment variables.")
+
 MODEL_LLM = 'qwen-plus'
 
 dashscope.api_key = DASHSCOPE_API_KEY
@@ -67,27 +71,47 @@ async def rewrite_prompt_with_qwen(user_phrase: str) -> str:
         logging.error(f"Qwen exception: {e}")
         return f"成都街头，年轻人正在体现'{user_phrase}'的概念，自然光线，日常环境"
 
-# ------------------ IMAGE GENERATION ------------------
-async def generate_image_from_prompt(prompt: str, update: Update) -> Optional[str]:
+# ------------------ YANDEX IMAGE GENERATION ------------------
+async def generate_image_with_yandex(prompt: str, update: Update) -> Optional[str]:
+    """Generate image using Yandex Art API (asynchronous workflow)"""
     try:
-        resp = ImageSynthesis.async_call(
-            model=MODEL_IMAGE,
-            prompt=prompt,
-            size=SIZE,
-            n=1
-        )
+        # Step 1: Send generation request
+        url = "https://llm.api.cloud.yandex.net/foundationModels/v1/imageGenerationAsync"
+        headers = {
+            "Authorization": f"Api-Key {YANDEX_API_KEY}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "modelUri": f"art://{YANDEX_FOLDER_ID}/yandex-art/latest",
+            "generationOptions": {
+                "seed": 42,
+                "aspectRatio": {
+                    "widthRatio": 1,
+                    "heightRatio": 1
+                }
+            },
+            "messages": [
+                {"text": prompt}
+            ]
+        }
+        
+        logging.info(f"Sending Yandex image request for prompt: {prompt}")
+        resp = requests.post(url, headers=headers, json=payload, timeout=60)
         
         if resp.status_code != 200:
-            logging.error(f"Image API error: {resp.code} - {resp.message}")
+            logging.error(f"Yandex API error: {resp.status_code} - {resp.text}")
             return None
         
-        task_id = resp.output['task_id']
-        logging.info(f"Task created: {task_id}")
+        data = resp.json()
+        operation_id = data["id"]
+        logging.info(f"Yandex operation ID: {operation_id}")
         
-        max_wait = 180
-        poll_interval = 4
+        # Step 2: Poll for result
+        result_url = f"https://llm.api.cloud.yandex.net:443/operations/{operation_id}"
+        
+        max_wait = 180  # 3 minutes max
+        poll_interval = 5
         elapsed = 0
-        last_status = None
         notification_sent = False
         
         while elapsed < max_wait:
@@ -95,41 +119,57 @@ async def generate_image_from_prompt(prompt: str, update: Update) -> Optional[st
             elapsed += poll_interval
             
             try:
-                status_resp = ImageSynthesis.fetch(task_id)
+                result_resp = requests.get(result_url, headers=headers, timeout=30)
             except Exception as e:
-                logging.error(f"Status check exception: {e}")
+                logging.error(f"Yandex status check exception: {e}")
                 continue
             
-            if status_resp.status_code != 200:
-                logging.error(f"Status check error: {status_resp.code} - {status_resp.message}")
+            if result_resp.status_code != 200:
+                logging.error(f"Yandex status check error: {result_resp.status_code}")
                 continue
             
-            task_status = status_resp.output.get('task_status', 'UNKNOWN')
+            result_data = result_resp.json()
             
-            if task_status != last_status:
-                logging.info(f"Task {task_id} status: {task_status}")
-                last_status = task_status
-            
-            if elapsed >= 30 and not notification_sent and task_status == 'PENDING':
+            # Send waiting message after 30 seconds
+            if elapsed >= 30 and not notification_sent and not result_data.get("done"):
                 try:
                     await update.message.reply_text("⏳ 图像生成队列较长，请继续等待...")
                     notification_sent = True
                 except:
                     pass
             
-            if task_status == 'SUCCEEDED':
-                return status_resp.output['results'][0]['url']
-            elif task_status == 'FAILED':
-                error_msg = status_resp.output.get('message', 'Unknown error')
-                logging.error(f"Task failed: {error_msg}")
-                return None
+            # Check if generation is complete
+            if result_data.get("done"):
+                if "error" in result_data:
+                    error_msg = result_data["error"].get("message", "Unknown error")
+                    logging.error(f"Yandex generation failed: {error_msg}")
+                    return None
+                
+                # Extract base64 image
+                if "response" in result_data and "image" in result_data["response"]:
+                    image_b64 = result_data["response"]["image"]
+                    logging.info("Yandex image generation successful")
+                    
+                    # Save base64 to temporary file
+                    img_name = f"{uuid.uuid4().hex[:8]}.png"
+                    img_path = os.path.join(TEMP_DIR, img_name)
+                    
+                    image_bytes = base64.b64decode(image_b64)
+                    with open(img_path, 'wb') as f:
+                        f.write(image_bytes)
+                    
+                    return img_path  # Return local path instead of URL
+                else:
+                    logging.error("Yandex response missing image data")
+                    return None
         
-        logging.error(f"Task timed out after {max_wait} seconds (status: {last_status})")
+        # Timeout
+        logging.error(f"Yandex generation timed out after {max_wait} seconds")
         await update.message.reply_text("⏱️ 生成超时。服务器队列可能繁忙，请稍后重试。")
         return None
         
     except Exception as e:
-        logging.error(f"Image generation exception: {e}")
+        logging.error(f"Yandex image generation exception: {e}")
         return None
 
 # ------------------ TELEGRAM HANDLERS ------------------
@@ -159,20 +199,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         enhanced_prompt = text
         logging.info(f"Direct prompt (English): {enhanced_prompt}")
 
-    img_url = await generate_image_from_prompt(enhanced_prompt, update)
-    if not img_url:
+    # Generate image using Yandex Art API
+    img_path = await generate_image_with_yandex(enhanced_prompt, update)
+    if not img_path:
         await update.message.reply_text("❌ 图像生成失败，请重试。如果持续失败，可能是服务器繁忙。")
         return
 
     try:
-        img_name = f"{uuid.uuid4().hex[:8]}.png"
-        img_path = os.path.join(TEMP_DIR, img_name)
-        with requests.get(img_url, stream=True, timeout=120) as r:
-            r.raise_for_status()
-            with open(img_path, 'wb') as f:
-                for chunk in r.iter_content(8192):
-                    f.write(chunk)
-
+        # Send the image
         with open(img_path, 'rb') as photo:
             if is_chinese(text):
                 caption = f"✅ 原词: {text}\n🎨 场景: {enhanced_prompt[:200]}"
@@ -180,11 +214,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 caption = f"✅ Prompt: {text}"
             await update.message.reply_photo(photo=photo, caption=caption)
 
+        # Clean up temp file
         os.remove(img_path)
         logging.info(f"Image sent successfully for: {text}")
     except Exception as e:
         logging.error(f"Send image exception: {e}")
         await update.message.reply_text(f"⚠️ 发送图片失败: {str(e)}")
+        # Clean up on error too
+        if os.path.exists(img_path):
+            os.remove(img_path)
 
 # ------------------ MAIN ------------------
 def main():
@@ -195,7 +233,7 @@ def main():
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    print("✅ Bot is running...")
+    print("✅ Bot is running with Yandex Art API...")
     print("⚠️ Note: Image generation may take 1-3 minutes due to queue times")
     app.run_polling()
 
