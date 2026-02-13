@@ -1,5 +1,5 @@
 python-telegram-bot==20.7
-dashscope==1.14.1
+openai==1.12.0
 requests==2.31.0
 gspread==5.12.0
 google-auth==2.23.4

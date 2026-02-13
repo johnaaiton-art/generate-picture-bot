@@ -6,17 +6,16 @@ import asyncio
 import tempfile
 import base64
 import re
-from typing import Optional, List, Tuple
+from typing import Optional, List, Tuple, Dict, Any
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
-import dashscope
-from dashscope import Generation
+from openai import OpenAI
 import gspread
 from google.oauth2.service_account import Credentials
 
 # ------------------ CONFIG ------------------
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-DASHSCOPE_API_KEY = os.getenv('DASHSCOPE_API_KEY')
+DEEPSEEK_API_KEY = os.getenv('DEEPSEEK_API_KEY')
 YANDEX_API_KEY = os.getenv('YANDEX_API_KEY')
 YANDEX_FOLDER_ID = os.getenv('YANDEX_FOLDER_ID')
 
@@ -25,21 +24,22 @@ GOOGLE_CREDS_FILE = os.path.join(os.path.dirname(__file__), 'google-creds.json')
 SPREADSHEET_URL = "https://docs.google.com/spreadsheets/d/1H-ezqh5Vcl3_6YWJIy9KvgpDCsM3V6N4LJq0dqNbJS0/edit?gid=0#gid=0"
 SHEET_NAME = "Chinese"
 
-if not TELEGRAM_BOT_TOKEN or not DASHSCOPE_API_KEY:
-    raise EnvironmentError("Missing TELEGRAM_BOT_TOKEN or DASHSCOPE_API_KEY in environment variables.")
+if not TELEGRAM_BOT_TOKEN or not DEEPSEEK_API_KEY:
+    raise EnvironmentError("Missing TELEGRAM_BOT_TOKEN or DEEPSEEK_API_KEY in environment variables.")
 
 if not YANDEX_API_KEY or not YANDEX_FOLDER_ID:
     raise EnvironmentError("Missing YANDEX_API_KEY or YANDEX_FOLDER_ID in environment variables.")
 
-MODEL_LLM = 'qwen-plus'
-
-dashscope.api_key = DASHSCOPE_API_KEY
-dashscope.base_http_api_url = 'https://dashscope-intl.aliyuncs.com/api/v1'
-
 TEMP_DIR = tempfile.mkdtemp()
 
 # Cache for collocations (like Hebrew bot's LAST_RESULTS)
-COLLOCATION_CACHE = {}
+COLLOCATION_CACHE: Dict[int, List[Tuple[str, str]]] = {}
+
+# Initialize DeepSeek client (like Hebrew bot)
+deepseek_client = OpenAI(
+    api_key=DEEPSEEK_API_KEY,
+    base_url="https://api.deepseek.com"
+)
 
 # Initialize Google Sheets client
 def get_google_sheets_client():
@@ -83,100 +83,109 @@ def extract_collocation_request(text: str) -> Optional[str]:
 # ------------------ COLLOCATION GENERATION ------------------
 async def generate_collocations(chinese_word: str) -> List[Tuple[str, str]]:
     """
-    Generate typical collocations for a Chinese word.
+    Generate typical collocations using DeepSeek (like Hebrew bot).
     Returns list of (chinese_collocation, english_translation) tuples.
     """
-    system_prompt = (
-        "你是一个中文搭配词专家。请为给定的中文词提供5个最常用的搭配短语。\n"
-        "CRITICAL要求：\n"
-        "1. 每个搭配必须是2-4个汉字的短语（不要完整句子！）\n"
-        "2. 每个搭配必须包含原词\n"
-        "3. 提供简短的英文翻译（1-3个英文词）\n"
-        "4. 输出格式：每行一个搭配，格式为'中文搭配|英文翻译'\n"
-        "5. 只输出搭配列表，不要例句或解释\n\n"
-        "正确示例：\n"
-        "途径：\n"
-        "有效途径|effective means\n"
-        "法律途径|legal channel\n"
-        "外交途径|diplomatic channel\n\n"
-        "错误示例（太长）：\n"
-        "加强实践教学是提升学生动手能力的有效途径 ❌\n"
-        "通过途径解决问题 ❌"
-    )
+    system_prompt = """You are a Chinese collocation expert.
 
-    user_prompt = f"请为'{chinese_word}'生成5个常用搭配短语（必须2-4个汉字）。"
+CRITICAL FORMAT REQUIREMENT:
+Every line MUST use this EXACT format: 中文搭配|English translation
+The pipe symbol | is MANDATORY between Chinese and English.
+
+RULES:
+1. Each collocation must be 2-4 Chinese characters (NOT full sentences)
+2. Each collocation must contain the original word
+3. Provide SHORT English translation (1-3 words)
+4. Give EXACTLY 5 collocations
+5. Output ONLY the list, no numbering, no explanations
+
+CORRECT EXAMPLE for 途径:
+有效途径|effective means
+法律途径|legal channel
+外交途径|diplomatic channel
+和平途径|peaceful means
+正式途径|official channel
+
+WRONG (missing pipe or English):
+有效途径 ❌
+途径之一 ❌"""
+
+    user_prompt = f"Generate 5 collocations for: {chinese_word}"
 
     try:
-        response = Generation.call(
-            model=MODEL_LLM,
-            prompt=user_prompt,
-            system=system_prompt,
-            max_tokens=200,
-            temperature=0.3
+        # Use DeepSeek like Hebrew bot
+        response = deepseek_client.chat.completions.create(
+            model="deepseek-chat",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            temperature=0.2
         )
         
-        if response.status_code == 200:
-            result_text = response.output['text'].strip()
+        result_text = response.choices[0].message.content.strip()
+        logging.info(f"DeepSeek raw response: {result_text}")
+        
+        # Parse the response
+        collocations = []
+        lines = result_text.split('\n')
+        
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
             
-            # Parse the response
-            collocations = []
-            lines = result_text.split('\n')
+            # Remove numbering
+            line = re.sub(r'^\d+[\.\)]\s*', '', line)
             
-            for line in lines:
-                line = line.strip()
-                if not line:
-                    continue
-                
-                # Remove numbering if present (1. 2. etc.)
-                line = re.sub(r'^\d+[\.\)]\s*', '', line)
-                
-                # Split by | or common separators
-                parts = re.split(r'[|：:\-—]', line, maxsplit=1)
-                
-                if len(parts) == 2:
-                    chinese = parts[0].strip()
-                    english = parts[1].strip()
-                    
-                    # Clean up quotes
-                    chinese = chinese.replace('"', '').replace('"', '').replace('"', '')
-                    english = english.replace('"', '').replace('"', '').replace('"', '')
-                    
-                    # CRITICAL: Only accept SHORT collocations (2-6 characters max)
-                    if chinese and english and 2 <= len(chinese) <= 6:
-                        collocations.append((chinese, english))
-                    else:
-                        logging.warning(f"Rejected long collocation: {chinese} ({len(chinese)} chars)")
+            # MUST have pipe
+            if '|' not in line:
+                logging.warning(f"Skipping line without pipe: {line}")
+                continue
             
-            # If we got at least some collocations, return them
-            if collocations:
-                return collocations[:5]  # Max 5
-            else:
-                # Fallback with short default
-                logging.warning(f"Failed to parse collocations from: {result_text}")
-                return [(f"{chinese_word}用法", "usage")]
+            # Split by pipe
+            parts = line.split('|', 1)
+            
+            if len(parts) == 2:
+                chinese = parts[0].strip()
+                english = parts[1].strip()
+                
+                # Clean quotes
+                chinese = chinese.replace('"', '').replace('"', '').replace('"', '')
+                english = english.replace('"', '').replace('"', '').replace('"', '')
+                
+                # Only SHORT collocations (2-6 chars)
+                if chinese and english and 2 <= len(chinese) <= 6:
+                    collocations.append((chinese, english))
+                else:
+                    logging.warning(f"Rejected (too long): {chinese} ({len(chinese)} chars)")
+        
+        if collocations:
+            return collocations[:5]
         else:
-            logging.error(f"API error: {response.code} - {response.message}")
+            logging.error(f"No valid collocations parsed from: {result_text}")
             return [(f"{chinese_word}用法", "usage")]
             
     except Exception as e:
-        logging.error(f"Collocation generation exception: {e}")
+        logging.error(f"DeepSeek collocation error: {e}")
         return [(f"{chinese_word}用法", "usage")]
 
 # ------------------ GOOGLE SHEETS OPERATIONS ------------------
 def save_collocation_to_sheet(chinese: str, english: str) -> bool:
-    """Save a collocation to Google Sheets (like Hebrew bot)"""
+    """Save a collocation to Google Sheets (exactly like Hebrew bot)"""
     try:
         client = get_google_sheets_client()
         if not client:
             logging.error("Google Sheets client not initialized")
             return False
         
-        # Open the spreadsheet and worksheet (like Hebrew bot)
+        # Open by URL then get worksheet by name (like Hebrew bot)
         spreadsheet = client.open_by_url(SPREADSHEET_URL)
         worksheet = spreadsheet.worksheet(SHEET_NAME)
         
-        # Append the row (like Hebrew bot: just append, no duplicate check)
-        worksheet.append_row([chinese, english], value_input_option="USER_ENTERED")
+        # Simple append with value_input_option (like Hebrew bot)
+        row = [chinese, english]
+        worksheet.append_row(row, value_input_option="USER_ENTERED")
         logging.info(f"Saved to sheet: {chinese} | {english}")
         return True
         
@@ -185,7 +194,7 @@ def save_collocation_to_sheet(chinese: str, english: str) -> bool:
         return False
 
 # ------------------ PROMPT REWRITING ------------------
-async def rewrite_prompt_with_qwen(user_phrase: str) -> str:
+async def rewrite_prompt_with_deepseek(user_phrase: str) -> str:
     """For Chinese input: enhance with Chengdu context"""
     system_prompt = (
         "你是一个专为图像生成模型设计的提示词工程师。"
@@ -200,21 +209,18 @@ async def rewrite_prompt_with_qwen(user_phrase: str) -> str:
     user_prompt = f"短语：{user_phrase}"
 
     try:
-        response = Generation.call(
-            model=MODEL_LLM,
-            prompt=user_prompt,
-            system=system_prompt,
-            max_tokens=200,
+        response = deepseek_client.chat.completions.create(
+            model="deepseek-chat",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
             temperature=0.6
         )
-        if response.status_code == 200:
-            rewritten = response.output['text'].strip()
-            return rewritten.replace('"', '').replace('"', '').replace('"', '')
-        else:
-            logging.error(f"Qwen error: {response.code} - {response.message}")
-            return f"成都场景中，人们正在体验'{user_phrase}'，真实生活，细节丰富"
+        rewritten = response.choices[0].message.content.strip()
+        return rewritten.replace('"', '').replace('"', '').replace('"', '')
     except Exception as e:
-        logging.error(f"Qwen exception: {e}")
+        logging.error(f"DeepSeek exception: {e}")
         return f"成都街头，年轻人正在体现'{user_phrase}'的概念，自然光线，日常环境"
 
 # ------------------ YANDEX IMAGE GENERATION ------------------
@@ -373,7 +379,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_chinese(text):
         # Chinese mode: enhance with Chengdu context
         await update.message.reply_text(f'🧠 正在理解"{text}"...')
-        enhanced_prompt = await rewrite_prompt_with_qwen(text)
+        enhanced_prompt = await rewrite_prompt_with_deepseek(text)
         logging.info(f"Enhanced prompt (Chinese): {enhanced_prompt}")
         await update.message.reply_text('🎨 正在生成图像，请稍候...')
     else:
@@ -464,7 +470,7 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(CallbackQueryHandler(button_callback))
     
-    print("✅ Bot is running with Yandex Art API and Collocation feature...")
+    print("✅ Bot is running with DeepSeek + Yandex Art API and Collocation feature...")
     print("📚 Collocation format: '途径 col' or '途径 collocation'")
     print("⚠️ Note: Image generation may take 1-3 minutes due to queue times")
     app.run_polling()
