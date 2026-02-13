@@ -83,27 +83,35 @@ def extract_collocation_request(text: str) -> Optional[str]:
 # ------------------ COLLOCATION GENERATION ------------------
 async def generate_collocations(chinese_word: str) -> List[Tuple[str, str]]:
     """
-    Generate typical collocations for a Chinese word using Qwen.
+    Generate typical collocations for a Chinese word.
     Returns list of (chinese_collocation, english_translation) tuples.
     """
     system_prompt = (
-        "你是一个中文搭配词专家。请为给定的中文词提供5个最常用的搭配短语。"
-        "要求："
-        "1. 每个搭配必须包含原词"
-        "2. 提供准确的英文翻译"
-        "3. 按使用频率从高到低排序"
-        "4. 输出格式：每行一个搭配，格式为'中文搭配|英文翻译'"
-        "5. 只输出搭配列表，不要解释"
+        "你是一个中文搭配词专家。请为给定的中文词提供5个最常用的搭配短语。\n"
+        "CRITICAL要求：\n"
+        "1. 每个搭配必须是2-4个汉字的短语（不要完整句子！）\n"
+        "2. 每个搭配必须包含原词\n"
+        "3. 提供简短的英文翻译（1-3个英文词）\n"
+        "4. 输出格式：每行一个搭配，格式为'中文搭配|英文翻译'\n"
+        "5. 只输出搭配列表，不要例句或解释\n\n"
+        "正确示例：\n"
+        "途径：\n"
+        "有效途径|effective means\n"
+        "法律途径|legal channel\n"
+        "外交途径|diplomatic channel\n\n"
+        "错误示例（太长）：\n"
+        "加强实践教学是提升学生动手能力的有效途径 ❌\n"
+        "通过途径解决问题 ❌"
     )
 
-    user_prompt = f"请为'{chinese_word}'生成5个常用搭配。"
+    user_prompt = f"请为'{chinese_word}'生成5个常用搭配短语（必须2-4个汉字）。"
 
     try:
         response = Generation.call(
             model=MODEL_LLM,
             prompt=user_prompt,
             system=system_prompt,
-            max_tokens=300,
+            max_tokens=200,
             temperature=0.3
         )
         
@@ -133,37 +141,42 @@ async def generate_collocations(chinese_word: str) -> List[Tuple[str, str]]:
                     chinese = chinese.replace('"', '').replace('"', '').replace('"', '')
                     english = english.replace('"', '').replace('"', '').replace('"', '')
                     
-                    if chinese and english:
+                    # CRITICAL: Only accept SHORT collocations (2-6 characters max)
+                    if chinese and english and 2 <= len(chinese) <= 6:
                         collocations.append((chinese, english))
+                    else:
+                        logging.warning(f"Rejected long collocation: {chinese} ({len(chinese)} chars)")
             
             # If we got at least some collocations, return them
             if collocations:
                 return collocations[:5]  # Max 5
             else:
-                # Fallback
+                # Fallback with short default
                 logging.warning(f"Failed to parse collocations from: {result_text}")
-                return [(f"{chinese_word}的用法", "usage examples")]
+                return [(f"{chinese_word}用法", "usage")]
         else:
-            logging.error(f"Qwen error: {response.code} - {response.message}")
-            return [(f"{chinese_word}的用法", "usage examples")]
+            logging.error(f"API error: {response.code} - {response.message}")
+            return [(f"{chinese_word}用法", "usage")]
             
     except Exception as e:
         logging.error(f"Collocation generation exception: {e}")
-        return [(f"{chinese_word}的用法", "usage examples")]
+        return [(f"{chinese_word}用法", "usage")]
 
 # ------------------ GOOGLE SHEETS OPERATIONS ------------------
 def save_collocation_to_sheet(chinese: str, english: str) -> bool:
-    """Save a collocation to Google Sheets"""
+    """Save a collocation to Google Sheets (like Hebrew bot)"""
     try:
         client = get_google_sheets_client()
         if not client:
+            logging.error("Google Sheets client not initialized")
             return False
         
-        # Open the spreadsheet
-        sheet = client.open_by_url(SPREADSHEET_URL).worksheet(SHEET_NAME)
+        # Open the spreadsheet and worksheet (like Hebrew bot)
+        spreadsheet = client.open_by_url(SPREADSHEET_URL)
+        worksheet = spreadsheet.worksheet(SHEET_NAME)
         
-        # Append the row
-        sheet.append_row([chinese, english])
+        # Append the row (like Hebrew bot: just append, no duplicate check)
+        worksheet.append_row([chinese, english], value_input_option="USER_ENTERED")
         logging.info(f"Saved to sheet: {chinese} | {english}")
         return True
         
