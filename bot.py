@@ -38,6 +38,9 @@ dashscope.base_http_api_url = 'https://dashscope-intl.aliyuncs.com/api/v1'
 
 TEMP_DIR = tempfile.mkdtemp()
 
+# Cache for collocations (like Hebrew bot's LAST_RESULTS)
+COLLOCATION_CACHE = {}
+
 # Initialize Google Sheets client
 def get_google_sheets_client():
     """Initialize Google Sheets API client"""
@@ -330,12 +333,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ 未能生成搭配，请重试。")
             return
         
-        # Create inline keyboard with collocation buttons
+        # Store collocations in cache (like Hebrew bot)
+        chat_id = update.message.chat_id
+        COLLOCATION_CACHE[chat_id] = collocations
+        
+        # Create inline keyboard with index-based callback_data
         keyboard = []
-        for chinese, english in collocations:
+        for idx, (chinese, english) in enumerate(collocations):
             button_text = f"{chinese} {english}"
-            # Store both chinese and english in callback data
-            callback_data = f"save:{chinese}|{english}"
+            # Trim if too long for display
+            if len(button_text) > 60:
+                button_text = button_text[:57] + "..."
+            # Use only index (like Hebrew bot: f"save:{i}")
+            callback_data = f"save:{idx}"
             keyboard.append([InlineKeyboardButton(button_text, callback_data=callback_data)])
         
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -385,7 +395,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             os.remove(img_path)
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle button clicks for collocation saving"""
+    """Handle button clicks for collocation saving (like Hebrew bot)"""
     query = update.callback_query
     await query.answer()
     
@@ -393,14 +403,24 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not query.data.startswith("save:"):
         return
     
-    data = query.data.replace("save:", "")
-    parts = data.split("|")
-    
-    if len(parts) != 2:
+    try:
+        # Get index from callback data (like Hebrew bot)
+        idx = int(query.data.split(":")[1])
+        
+        # Retrieve collocations from global cache (like Hebrew bot)
+        chat_id = query.message.chat_id
+        cached = COLLOCATION_CACHE.get(chat_id)
+        
+        if not cached or idx >= len(cached):
+            await query.edit_message_text("❌ 数据已过期，请重新请求搭配")
+            return
+        
+        chinese, english = cached[idx]
+        
+    except (ValueError, IndexError, TypeError) as e:
+        logging.error(f"Button callback error: {e}")
         await query.edit_message_text("❌ 数据格式错误")
         return
-    
-    chinese, english = parts
     
     # Save to Google Sheets
     success = save_collocation_to_sheet(chinese, english)
