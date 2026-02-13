@@ -172,8 +172,10 @@ WRONG (missing pipe or English):
 
 # ------------------ GOOGLE SHEETS OPERATIONS ------------------
 def save_collocation_to_sheet(chinese: str, english: str) -> bool:
-    """Save a collocation to Google Sheets (exactly like Hebrew bot)"""
+    """Save a collocation to Google Sheets with timestamp"""
     try:
+        from datetime import datetime
+        
         client = get_google_sheets_client()
         if not client:
             logging.error("Google Sheets client not initialized")
@@ -183,10 +185,13 @@ def save_collocation_to_sheet(chinese: str, english: str) -> bool:
         spreadsheet = client.open_by_url(SPREADSHEET_URL)
         worksheet = spreadsheet.worksheet(SHEET_NAME)
         
-        # Simple append with value_input_option (like Hebrew bot)
-        row = [chinese, english]
+        # Add timestamp (current date and time)
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        # Row: Chinese | English | Timestamp
+        row = [chinese, english, timestamp]
         worksheet.append_row(row, value_input_option="USER_ENTERED")
-        logging.info(f"Saved to sheet: {chinese} | {english}")
+        logging.info(f"Saved to sheet: {chinese} | {english} | {timestamp}")
         return True
         
     except Exception as e:
