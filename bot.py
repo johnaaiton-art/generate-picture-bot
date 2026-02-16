@@ -32,10 +32,10 @@ if not YANDEX_API_KEY or not YANDEX_FOLDER_ID:
 
 TEMP_DIR = tempfile.mkdtemp()
 
-# Cache for collocations (like Hebrew bot's LAST_RESULTS)
+# Cache for collocations
 COLLOCATION_CACHE: Dict[int, List[Tuple[str, str]]] = {}
 
-# Initialize DeepSeek client (like Hebrew bot)
+# Initialize DeepSeek client
 deepseek_client = OpenAI(
     api_key=DEEPSEEK_API_KEY,
     base_url="https://api.deepseek.com"
@@ -80,10 +80,65 @@ def extract_collocation_request(text: str) -> Optional[str]:
         return match.group(1)  # Return the Chinese word
     return None
 
+# ------------------ DEFINITION GENERATION ------------------
+async def generate_definition(chinese_word: str) -> str:
+    """Generate definition and examples for a Chinese word using Yandex API"""
+    headers = {
+        "Authorization": f"Api-Key {YANDEX_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    
+    system_prompt = (
+        "你是一个中文词汇专家。用户会给你一个中文词语，"
+        "请提供简洁的定义和2-3个例句。"
+        "格式："
+        "定义：[简短定义]\n"
+        "例句：\n"
+        "1. [例句1]\n"
+        "2. [例句2]"
+    )
+    
+    data = {
+        "modelUri": f"gpt://{YANDEX_FOLDER_ID}/yandexgpt-lite",
+        "completionOptions": {
+            "stream": False,
+            "temperature": 0.3,
+            "maxTokens": 500
+        },
+        "messages": [
+            {
+                "role": "system",
+                "text": system_prompt
+            },
+            {
+                "role": "user",
+                "text": chinese_word
+            }
+        ]
+    }
+    
+    try:
+        response = requests.post(
+            "https://llm.api.cloud.yandex.net/foundationModels/v1/completion",
+            headers=headers,
+            json=data,
+            timeout=30
+        )
+        response.raise_for_status()
+        result = response.json()
+        
+        if 'result' in result and 'alternatives' in result['result']:
+            definition = result['result']['alternatives'][0]['message']['text'].strip()
+            return definition
+        return f"定义：{chinese_word} 的词义"
+    except Exception as e:
+        logging.error(f"Yandex definition error: {e}")
+        return f"定义：{chinese_word}"
+
 # ------------------ COLLOCATION GENERATION ------------------
 async def generate_collocations(chinese_word: str) -> List[Tuple[str, str]]:
     """
-    Generate typical collocations using DeepSeek (like Hebrew bot).
+    Generate typical collocations using DeepSeek.
     Returns list of (chinese_collocation, english_translation) tuples.
     """
     system_prompt = """You are a Chinese collocation expert.
@@ -113,7 +168,6 @@ WRONG (missing pipe or English):
     user_prompt = f"Generate 5 collocations for: {chinese_word}"
 
     try:
-        # Use DeepSeek like Hebrew bot
         response = deepseek_client.chat.completions.create(
             model="deepseek-chat",
             messages=[
@@ -181,11 +235,11 @@ def save_collocation_to_sheet(chinese: str, english: str) -> bool:
             logging.error("Google Sheets client not initialized")
             return False
         
-        # Open by URL then get worksheet by name (like Hebrew bot)
+        # Open by URL then get worksheet by name
         spreadsheet = client.open_by_url(SPREADSHEET_URL)
         worksheet = spreadsheet.worksheet(SHEET_NAME)
         
-        # Add timestamp (current date and time)
+        # Add timestamp
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
         # Row: Chinese | English | Timestamp
@@ -198,34 +252,60 @@ def save_collocation_to_sheet(chinese: str, english: str) -> bool:
         logging.error(f"Failed to save to sheet: {e}")
         return False
 
-# ------------------ PROMPT REWRITING ------------------
-async def rewrite_prompt_with_deepseek(user_phrase: str) -> str:
-    """For Chinese input: enhance with Chengdu context"""
+# ------------------ IMAGE PROMPT GENERATION ------------------
+async def generate_image_prompt(user_phrase: str) -> str:
+    """For Chinese input: create scene description in Russian for Yandex API"""
+    headers = {
+        "Authorization": f"Api-Key {YANDEX_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    
     system_prompt = (
-        "你是一个专为图像生成模型设计的提示词工程师。"
-        "请将用户给出的中文短语（可能抽象）转化为一个具体、生动、视觉化的场景描述。"
-        "要求："
-        "1. 场景必须设定在中国成都；"
-        "2. 主角是年轻的中国人（避免敏感或浪漫化描述）；"
-        "3. 包含具体地点（如茶馆、公园、图书馆、街道）、活动、表情、天气、光线、物品等细节；"
-        "4. 语言简洁，用中文输出，不要解释，只输出改写后的描述。"
+        f"Создай краткое, конкретное описание сцены для генерации изображения на основе китайской фразы: '{user_phrase}'. "
+        "Требования: "
+        "1. Действие происходит в Китае (город Чэнду); "
+        "2. Главный персонаж - молодой китаец или китаянка; "
+        "3. Включи конкретное место (парк, чайная, библиотека, улица), действие, погоду, освещение; "
+        "4. Опиши сцену кратко и визуально, одним-двумя предложениями. "
+        "Выведи ТОЛЬКО описание сцены по-русски, без объяснений и без повтора исходной фразы."
     )
-
-    user_prompt = f"短语：{user_phrase}"
-
+    
+    data = {
+        "modelUri": f"gpt://{YANDEX_FOLDER_ID}/yandexgpt-lite",
+        "completionOptions": {
+            "stream": False,
+            "temperature": 0.7,
+            "maxTokens": 200
+        },
+        "messages": [
+            {
+                "role": "system",
+                "text": system_prompt
+            },
+            {
+                "role": "user",
+                "text": f"Фраза: {user_phrase}"
+            }
+        ]
+    }
+    
     try:
-        response = deepseek_client.chat.completions.create(
-            model="deepseek-chat",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            temperature=0.6
+        response = requests.post(
+            "https://llm.api.cloud.yandex.net/foundationModels/v1/completion",
+            headers=headers,
+            json=data,
+            timeout=30
         )
-        rewritten = response.choices[0].message.content.strip()
-        return rewritten.replace('"', '').replace('"', '').replace('"', '')
+        response.raise_for_status()
+        result = response.json()
+        
+        if 'result' in result and 'alternatives' in result['result']:
+            prompt = result['result']['alternatives'][0]['message']['text'].strip()
+            logging.info(f"Generated image prompt: {prompt}")
+            return prompt
+        return f"成都街头，年轻人正在体现'{user_phrase}'的概念，自然光线，日常环境"
     except Exception as e:
-        logging.error(f"DeepSeek exception: {e}")
+        logging.error(f"Yandex prompt generation error: {e}")
         return f"成都街头，年轻人正在体现'{user_phrase}'的概念，自然光线，日常环境"
 
 # ------------------ YANDEX IMAGE GENERATION ------------------
@@ -315,7 +395,7 @@ async def generate_image_with_yandex(prompt: str, update: Update) -> Optional[st
                     with open(img_path, 'wb') as f:
                         f.write(image_bytes)
                     
-                    return img_path  # Return local path instead of URL
+                    return img_path
                 else:
                     logging.error("Yandex response missing image data")
                     return None
@@ -332,11 +412,16 @@ async def generate_image_with_yandex(prompt: str, update: Update) -> Optional[st
 # ------------------ TELEGRAM HANDLERS ------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        '🖼️ Send me text in Chinese or English:\n'
-        '• Chinese: I will create a scene set in Chengdu\n'
-        '• English: I will generate exactly what you describe\n'
-        '• Chinese word + "col": Get collocations (e.g., "途径 col")\n\n'
-        '⚠️ Note: Image generation may take 1-3 minutes.'
+        '🖼️ 中文学习助手\n\n'
+        '功能：\n'
+        '1. 发送中文词语 → 定义 + 图片\n'
+        '2. 发送"中文词 col" → 搭配按钮(保存到表格)\n'
+        '3. 发送英文描述 → 直接生成图片\n\n'
+        '例如:\n'
+        '• "激发" → 定义和图片\n'
+        '• "激发 col" → 搭配列表\n'
+        '• "a tired donkey" → 生成图片\n\n'
+        '⚠️ 图片生成需要1-3分钟'
     )
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -348,7 +433,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chinese_word = extract_collocation_request(text)
     
     if chinese_word:
-        # Collocation mode
+        # MODE 2: Collocation request
         await update.message.reply_text(f'📚 正在查找 "{chinese_word}" 的常用搭配...')
         
         collocations = await generate_collocations(chinese_word)
@@ -357,18 +442,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ 未能生成搭配，请重试。")
             return
         
-        # Store collocations in cache (like Hebrew bot)
+        # Store collocations in cache
         chat_id = update.message.chat_id
         COLLOCATION_CACHE[chat_id] = collocations
         
-        # Create inline keyboard with index-based callback_data
+        # Create inline keyboard
         keyboard = []
         for idx, (chinese, english) in enumerate(collocations):
             button_text = f"{chinese} {english}"
-            # Trim if too long for display
             if len(button_text) > 60:
                 button_text = button_text[:57] + "..."
-            # Use only index (like Hebrew bot: f"save:{i}")
             callback_data = f"save:{idx}"
             keyboard.append([InlineKeyboardButton(button_text, callback_data=callback_data)])
         
@@ -380,58 +463,72 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     
-    # Image generation mode (original functionality)
+    # Check if Chinese-only (MODE 1) or non-Chinese (MODE 3)
     if is_chinese(text):
-        # Chinese mode: enhance with Chengdu context
-        await update.message.reply_text(f'🧠 正在理解"{text}"...')
-        enhanced_prompt = await rewrite_prompt_with_deepseek(text)
-        logging.info(f"Enhanced prompt (Chinese): {enhanced_prompt}")
-        await update.message.reply_text('🎨 正在生成图像，请稍候...')
-    else:
-        # English mode: use directly as prompt
-        await update.message.reply_text(f'🎨 Generating: "{text}"...')
-        enhanced_prompt = text
-        logging.info(f"Direct prompt (English): {enhanced_prompt}")
-
-    # Generate image using Yandex Art API
-    img_path = await generate_image_with_yandex(enhanced_prompt, update)
-    if not img_path:
-        await update.message.reply_text("❌ 图像生成失败，请重试。如果持续失败，可能是服务器繁忙。")
-        return
-
-    try:
-        # Send the image
-        with open(img_path, 'rb') as photo:
-            if is_chinese(text):
-                caption = f"✅ 原词: {text}\n🎨 场景: {enhanced_prompt[:200]}"
-            else:
-                caption = f"✅ Prompt: {text}"
-            await update.message.reply_photo(photo=photo, caption=caption)
-
-        # Clean up temp file
-        os.remove(img_path)
-        logging.info(f"Image sent successfully for: {text}")
-    except Exception as e:
-        logging.error(f"Send image exception: {e}")
-        await update.message.reply_text(f"⚠️ 发送图片失败: {str(e)}")
-        # Clean up on error too
-        if os.path.exists(img_path):
+        # MODE 1: Chinese word only → Definition + Picture
+        await update.message.reply_text(f'📖 正在查找 "{text}" 的定义...')
+        
+        # Generate definition
+        definition = await generate_definition(text)
+        await update.message.reply_text(f"📝 {definition}")
+        
+        # Generate image prompt
+        await update.message.reply_text('🎨 正在生成图像...')
+        image_prompt = await generate_image_prompt(text)
+        logging.info(f"Image prompt for Chinese: {image_prompt}")
+        
+        # Generate image
+        img_path = await generate_image_with_yandex(image_prompt, update)
+        if not img_path:
+            await update.message.reply_text("❌ 图像生成失败，请重试。")
+            return
+        
+        try:
+            with open(img_path, 'rb') as photo:
+                await update.message.reply_photo(photo=photo, caption=f"🖼️ {text}")
             os.remove(img_path)
+            logging.info(f"Sent definition + image for: {text}")
+        except Exception as e:
+            logging.error(f"Send image exception: {e}")
+            await update.message.reply_text(f"⚠️ 发送图片失败: {str(e)}")
+            if os.path.exists(img_path):
+                os.remove(img_path)
+    else:
+        # MODE 3: Non-Chinese description → Direct image generation
+        await update.message.reply_text(f'🎨 Generating: "{text}"...')
+        
+        # Use text directly as prompt
+        img_path = await generate_image_with_yandex(text, update)
+        if not img_path:
+            await update.message.reply_text("❌ Image generation failed. Please try again.")
+            return
+        
+        try:
+            with open(img_path, 'rb') as photo:
+                await update.message.reply_photo(photo=photo, caption=f"✅ Prompt: {text}")
+            os.remove(img_path)
+            logging.info(f"Sent image for English prompt: {text}")
+        except Exception as e:
+            logging.error(f"Send image exception: {e}")
+            await update.message.reply_text(f"⚠️ Failed to send image: {str(e)}")
+            if os.path.exists(img_path):
+                os.remove(img_path)
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle button clicks for collocation saving (like Hebrew bot)"""
+    """Handle button clicks for collocation saving"""
     query = update.callback_query
     await query.answer()
     
     # Parse callback data
     if not query.data.startswith("save:"):
+        await query.edit_message_text("❌ 无效的按钮数据")
         return
     
     try:
-        # Get index from callback data (like Hebrew bot)
+        # Get index from callback data
         idx = int(query.data.split(":")[1])
         
-        # Retrieve collocations from global cache (like Hebrew bot)
+        # Retrieve collocations from cache
         chat_id = query.message.chat_id
         cached = COLLOCATION_CACHE.get(chat_id)
         
@@ -475,9 +572,11 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(CallbackQueryHandler(button_callback))
     
-    print("✅ Bot is running with DeepSeek + Yandex Art API and Collocation feature...")
-    print("📚 Collocation format: '途径 col' or '途径 collocation'")
-    print("⚠️ Note: Image generation may take 1-3 minutes due to queue times")
+    print("✅ Bot is running with 3 modes:")
+    print("   1. Chinese word → Definition + Picture")
+    print("   2. Chinese word + 'col' → Collocations to Google Sheets")
+    print("   3. English description → Direct picture generation")
+    print("⚠️ Note: Image generation may take 1-3 minutes")
     app.run_polling()
 
 if __name__ == '__main__':
