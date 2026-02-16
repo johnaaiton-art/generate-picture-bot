@@ -90,7 +90,8 @@ async def generate_definition(chinese_word: str) -> str:
     
     system_prompt = (
         "你是一个中文词汇专家。用户会给你一个中文词语，"
-        "请提供简洁的定义和2-3个例句。"
+        "请用简体中文提供简洁的定义和2-3个例句。"
+        "要求：必须使用简体中文，不要使用繁体中文。"
         "格式："
         "定义：[简短定义]\n"
         "例句：\n"
@@ -153,6 +154,7 @@ RULES:
 3. Provide SHORT English translation (1-3 words)
 4. Give EXACTLY 5 collocations
 5. Output ONLY the list, no numbering, no explanations
+6. Use SIMPLIFIED Chinese characters only (简体中文)
 
 CORRECT EXAMPLE for 途径:
 有效途径|effective means
@@ -425,12 +427,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
-    if not text or text.startswith('/'):
+    """Handle incoming messages."""
+    user_input = update.message.text.strip()
+    
+    if not user_input or user_input.startswith('/'):
         return
 
     # Check if this is a collocation request
-    chinese_word = extract_collocation_request(text)
+    chinese_word = extract_collocation_request(user_input)
     
     if chinese_word:
         # MODE 2: Collocation request
@@ -464,17 +468,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     # Check if Chinese-only (MODE 1) or non-Chinese (MODE 3)
-    if is_chinese(text):
+    if is_chinese(user_input):
         # MODE 1: Chinese word only → Definition + Picture
-        await update.message.reply_text(f'📖 正在查找 "{text}" 的定义...')
+        await update.message.reply_text(f'📖 正在查找 "{user_input}" 的定义...')
         
         # Generate definition
-        definition = await generate_definition(text)
+        definition = await generate_definition(user_input)
         await update.message.reply_text(f"📝 {definition}")
         
         # Generate image prompt
         await update.message.reply_text('🎨 正在生成图像...')
-        image_prompt = await generate_image_prompt(text)
+        image_prompt = await generate_image_prompt(user_input)
         logging.info(f"Image prompt for Chinese: {image_prompt}")
         
         # Generate image
@@ -485,9 +489,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         try:
             with open(img_path, 'rb') as photo:
-                await update.message.reply_photo(photo=photo, caption=f"🖼️ {text}")
+                await update.message.reply_photo(photo=photo, caption=f"🖼️ {user_input}")
             os.remove(img_path)
-            logging.info(f"Sent definition + image for: {text}")
+            logging.info(f"Sent definition + image for: {user_input}")
         except Exception as e:
             logging.error(f"Send image exception: {e}")
             await update.message.reply_text(f"⚠️ 发送图片失败: {str(e)}")
@@ -495,19 +499,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 os.remove(img_path)
     else:
         # MODE 3: Non-Chinese description → Direct image generation
-        await update.message.reply_text(f'🎨 Generating: "{text}"...')
+        await update.message.reply_text(f'🎨 Generating: "{user_input}"...')
         
         # Use text directly as prompt
-        img_path = await generate_image_with_yandex(text, update)
+        img_path = await generate_image_with_yandex(user_input, update)
         if not img_path:
             await update.message.reply_text("❌ Image generation failed. Please try again.")
             return
         
         try:
             with open(img_path, 'rb') as photo:
-                await update.message.reply_photo(photo=photo, caption=f"✅ Prompt: {text}")
+                await update.message.reply_photo(photo=photo, caption=f"✅ Prompt: {user_input}")
             os.remove(img_path)
-            logging.info(f"Sent image for English prompt: {text}")
+            logging.info(f"Sent image for English prompt: {user_input}")
         except Exception as e:
             logging.error(f"Send image exception: {e}")
             await update.message.reply_text(f"⚠️ Failed to send image: {str(e)}")
