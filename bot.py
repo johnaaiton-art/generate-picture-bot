@@ -560,7 +560,6 @@ async def handle_dif_request(update: Update, words: List[str]):
         # Header row (non-clickable label)
         keyboard.append([InlineKeyboardButton(f"— {word} —", callback_data="noop")])
 
-        row = []
         for col in collocations:
             chinese = col.get('chinese', '')
             english = col.get('english', '')
@@ -572,10 +571,8 @@ async def handle_dif_request(update: Update, words: List[str]):
             if len(btn_label) > 60:
                 btn_label = btn_label[:57] + "..."
             callback_data = f"save:{idx}"
-            row.append(InlineKeyboardButton(btn_label, callback_data=callback_data))
-
-        if row:
-            keyboard.append(row)
+            # Each button on its own row so full English is visible
+            keyboard.append([InlineKeyboardButton(btn_label, callback_data=callback_data)])
 
     # Cache all collocations for this chat
     COLLOCATION_CACHE[chat_id] = all_collocations
