@@ -98,6 +98,19 @@ def extract_collocation_request(text: str) -> Optional[str]:
         return match.group(1)  # Return the Chinese word
     return None
 
+def extract_mar_request(text: str) -> Optional[str]:
+    """
+    Check if text is a travel-phrase (mar) request.
+    Format: "入住 mar"
+    Returns the Chinese word if matched, None otherwise.
+    """
+    text = text.strip()
+    pattern = r'^([\u4e00-\u9fff]+)\s+mar$'
+    match = re.match(pattern, text, re.IGNORECASE)
+    if match:
+        return match.group(1)
+    return None
+
 def extract_dif_request(text: str) -> Optional[List[str]]:
     """
     Check if text is a 'dif' request.
@@ -271,6 +284,84 @@ WRONG (missing pipe or English):
     except Exception as e:
         logging.error(f"DeepSeek collocation error: {e}")
         return [(f"{chinese_word}用法", "usage")]
+
+# ------------------ MAR (TRAVEL PHRASES) GENERATION ------------------
+async def generate_mar_phrases(chinese_word: str) -> List[Tuple[str, str]]:
+    """
+    Generate travel-focused, CEFR B1 phrases using DeepSeek.
+    Returns list of (chinese_phrase, english_translation) tuples.
+    """
+    system_prompt = """You are a Chinese language teacher specialising in travel Chinese for tourists.
+
+CRITICAL FORMAT REQUIREMENT:
+Every line MUST use this EXACT format: 中文短语|English translation
+The pipe symbol | is MANDATORY between Chinese and English.
+
+RULES:
+1. Each phrase must be 2-6 Chinese characters and contain the original word
+2. Focus on PRACTICAL TRAVEL situations: hotels, transport, restaurants, attractions, shopping
+3. Keep to CEFR B1 vocabulary or below — everyday, simple Chinese only
+4. Short English translation (1-5 words)
+5. Give EXACTLY 5 phrases
+6. Output ONLY the list, no numbering, no explanations
+7. Use SIMPLIFIED Chinese characters only (简体中文)
+8. Prefer phrases a tourist would actually say or read at a hotel, station, or restaurant
+
+CORRECT EXAMPLE for 入住:
+办理入住|check in
+入住酒店|check into hotel
+入住时间|check-in time
+提前入住|early check-in
+入住手续|check-in procedure
+
+WRONG (too formal/academic, missing pipe):
+合法入住 ❌
+有权入住 ❌"""
+
+    user_prompt = f"Generate 5 travel phrases for: {chinese_word}"
+
+    try:
+        response = deepseek_client.chat.completions.create(
+            model="deepseek-chat",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            temperature=0.2
+        )
+
+        result_text = response.choices[0].message.content.strip()
+        logging.info(f"DeepSeek mar raw response: {result_text}")
+
+        phrases = []
+        lines = result_text.split('\n')
+
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            line = re.sub(r'^\d+[\.\)]\s*', '', line)
+            if '|' not in line:
+                logging.warning(f"Mar: skipping line without pipe: {line}")
+                continue
+            parts = line.split('|', 1)
+            if len(parts) == 2:
+                chinese = parts[0].strip().replace('"', '').replace('\u201c', '').replace('\u201d', '')
+                english = parts[1].strip().replace('"', '').replace('\u201c', '').replace('\u201d', '')
+                if chinese and english and 2 <= len(chinese) <= 8:
+                    phrases.append((chinese, english))
+                else:
+                    logging.warning(f"Mar: rejected (bad length): {chinese} ({len(chinese)} chars)")
+
+        if phrases:
+            return phrases[:5]
+        else:
+            logging.error(f"Mar: no valid phrases parsed from: {result_text}")
+            return [(f"{chinese_word}旅游", "travel usage")]
+
+    except Exception as e:
+        logging.error(f"DeepSeek mar error: {e}")
+        return [(f"{chinese_word}旅游", "travel usage")]
 
 # ------------------ GOOGLE SHEETS OPERATIONS ------------------
 def save_collocation_to_sheet(chinese: str, english: str) -> bool:
@@ -517,12 +608,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         '功能：\n'
         '1. 发送中文词语 → 定义 + 图片\n'
         '2. 发送「中文词 col」→ 搭配按钮 (保存到表格)\n'
-        '3. 发送英文描述 → 直接生成图片\n'
-        '4. 发送「词1 词2 dif」→ 词义对比 + 搭配按钮\n'
-        '5. /anki → 生成 Anki 卡片 (TTS音频)\n\n'
+        '3. 发送「中文词 mar」→ 旅行短语 B1 (保存到表格)\n'
+        '4. 发送英文描述 → 直接生成图片\n'
+        '5. 发送「词1 词2 dif」→ 词义对比 + 搭配按钮\n'
+        '6. /anki → 生成 Anki 卡片 (TTS音频)\n\n'
         '例如:\n'
         '• 激发 → 定义和图片\n'
         '• 激发 col → 搭配列表\n'
+        '• 入住 mar → 旅行短语 (B1)\n'
         '• a tired donkey → 生成图片\n'
         '• 指引 导致 dif → 两词对比\n'
         '• 引导 指引 导致 dif → 三词对比\n'
@@ -767,6 +860,29 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handle_dif_request(update, dif_words)
         return
 
+    # Check if this is a mar (travel phrases) request
+    mar_word = extract_mar_request(user_input)
+    if mar_word:
+        await update.message.reply_text(f'✈️ 正在查找 "{mar_word}" 的旅行短语 (B1)...')
+        phrases = await generate_mar_phrases(mar_word)
+        if not phrases:
+            await update.message.reply_text("❌ 未能生成旅行短语，请重试。")
+            return
+        chat_id = update.message.chat_id
+        COLLOCATION_CACHE[chat_id] = phrases
+        keyboard = []
+        for idx, (chinese, english) in enumerate(phrases):
+            btn_text = f"{chinese} {english}"
+            if len(btn_text) > 60:
+                btn_text = btn_text[:57] + "..."
+            keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"save:{idx}")])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text(
+            f"✅ {len(phrases)} 个旅行短语（B1）：\n点击按钮保存到表格",
+            reply_markup=reply_markup
+        )
+        return
+
     # Check if this is a collocation request
     chinese_word = extract_collocation_request(user_input)
     
@@ -926,10 +1042,11 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(CallbackQueryHandler(button_callback))
     
-    print("✅ Bot is running with 3 modes:")
+    print("✅ Bot is running with 4 modes:")
     print("   1. Chinese word → Definition + Picture")
     print("   2. Chinese word + 'col' → Collocations to Google Sheets")
-    print("   3. English description → Direct picture generation")
+    print("   3. Chinese word + 'mar' → Travel phrases (B1) to Google Sheets")
+    print("   4. English description → Direct picture generation")
     print("⚠️ Note: Image generation may take 1-3 minutes")
     app.run_polling()
 
